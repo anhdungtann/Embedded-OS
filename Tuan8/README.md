@@ -164,3 +164,50 @@ perf record -g ./btl_app
 #### Bước 5: Xuất báo cáo để nộp bài
 - Lệnh thực hiện: `perf report --stdio > report_perf.txt`
 
+## Bài 2.6: Phân tích Tracing
+### Các bước thực hiện
+#### Bước 1: Cài strace và ltrace
+```
+make menuconfig
+# → Target packages → Debugging, profiling and benchmark
+# → [*] strace
+# → [*] ltrace
+make
+```
+#### Bước 2: thực hiện các lệnh:
+- Giám sát bằng `strace`. Chạy lệnh strace với chương trình:
+```
+strace -c btl_app
+```
+
+![Kết quả cuối cùng](images/anh2.6.1.jpg)
+- Phân tích các System Call hàng đầu:
+  - `futex_time64` (74.93%): Đây là hàm chiếm nhiều thời gian nhất.
+    - Lý do: `futex` (Fast Userspace Mutex) được dùng để quản lý việc đồng bộ hóa giữa các luồng (threads). Trong chương trình của bạn, các luồng (PZEM, Button, MQTT) thường xuyên phải đợi nhau hoặc đợi dữ liệu từ hàng đợi tin nhắn (message queue). Tỉ lệ này cao cho thấy chương trình đang dành phần lớn thời gian ở trạng thái "chờ" (ngủ).
+  - `execve` (6.24%): Đây là lệnh để hệ điều hành khởi chạy chính chương trình btl_app.
+  - `mmap2` và `mprotect`: Các lệnh này dùng để quản lý bộ nhớ, cấp phát không gian cho các thư viện shared và các biến trong chương trình.
+  - `openat` (11 calls, 4 errors):
+    - Chương trình đã cố gắng mở 11 file (có thể là các file driver trong `/dev` hoặc các thư viện hệ thống).
+    - Lưu ý: Có 4 lỗi (`errors`). Đây thường là do hệ thống tìm kiếm file trong nhiều đường dẫn khác nhau (PATH) nhưng không thấy, hoặc bạn đang cố truy cập một file driver chưa được cấp quyền.
+  - `clone` (5 calls): Đây chính là lệnh tạo ra các luồng (threads). Con số 5 cho thấy ngoài luồng chính, bạn đã tạo ra các luồng phụ cho Button, MQTT, OLED... đúng như thiết kế đa luồng của dự án.
+  - `write`: Lệnh ghi dữ liệu. Ở đây nó dùng để in các dòng log như "MQTT: Dang ket noi..." ra terminal của bạn.
+
+- Giám sát bằng `ltrace`. Chạy lệnh ltrace với chương trình:
+```
+ltrace -c btl_app
+```
+
+![Kết quả cuối cùng](images/anh2.6.2.jpg)
+
+- Phân tích các lời gọi thư viện (Library Calls)
+  - `pthread_join` (49.96%):
+    - Ý nghĩa: Đây là hàm dùng để đợi một luồng (thread) kết thúc.
+  - `__libc_start_mai` (50.00%):
+    - Ý nghĩa: Đây là hàm khởi tạo của thư viện C chuẩn (`libc`). Nó là điểm bắt đầu thực sự của mọi chương trình C trước khi hàm `main()` của bạn được gọi.
+  - pthread_create (5 calls):
+    - Ý nghĩa: Hàm này dùng để tạo luồng mới.
+    - Liên hệ thực tế: Con số 5 hoàn toàn khớp với kết quả từ strace trước đó. Nó xác nhận ứng dụng của bạn đã gọi thư viện libpthread để tạo ra 5 luồng chức năng (ví dụ: luồng đọc PZEM, luồng nút nhấn, luồng MQTT, luồng OLED và luồng xử lý chính).
+  - `memset` (2 calls):
+    - Ý nghĩa: Dùng để xóa hoặc khởi tạo vùng bộ nhớ (thường là xóa các struct về 0). Có khả năng bạn dùng nó để khởi tạo cấu trúc dữ liệu cho MQTT hoặc chuỗi hiển thị OLED.
+  - `write` & `open64`:
+    - Đây là các hàm thư viện bao bọc (wrapper) cho các lời gọi hệ thống cùng tên để thực hiện in log ra màn hình và mở các file thiết bị.
