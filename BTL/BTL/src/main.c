@@ -40,7 +40,7 @@ SSD1306_Name myOLED;
 struct mosquitto *global_mosq = NULL;
 
 mqd_t mq_limit, mq_pzem_oled, mq_pzem_mqtt;
-
+pthread_mutex_t lock_threshold;
 // --- Luồng 1: Đọc từ Driver PZEM (Producer) ---
 void* thread_read_pzem(void* arg) {
     char buf[MAX_PZEM_STR];
@@ -175,6 +175,7 @@ void* thread_button_handler(void* arg) {
             // Chỉ xử lý khi có sự kiện nhấn phím (value == 1)
             if (ev.type == EV_KEY && ev.value == 1) {
                 
+                pthread_mutex_lock(&lock_threshold);
                 if (ev.code == KEY_UP) {
                     // Kiểm tra nếu cộng thêm STEP vẫn chưa vượt MAX thì mới cộng
                     if (current_threshold + STEP <= MAX_THRESHOLD) {
@@ -195,9 +196,10 @@ void* thread_button_handler(void* arg) {
                         printf("[Nút DOWN] Đã đạt giới hạn tối thiểu: %.1fW\n", MIN_THRESHOLD);
                     }
                 }
-
+                float val_to_send = current_threshold;
+                pthread_mutex_unlock(&lock_threshold);
                 // Gửi giá trị ngưỡng mới vào Message Queue
-                if (mq_send(mq_limit, (const char*)&current_threshold, sizeof(current_threshold), 0) == -1) {
+                if (mq_send(mq_limit, (const char*)&val_to_send, sizeof(val_to_send), 0) == -1) {
                     perror("Lỗi mq_send trong luồng nút nhấn");
                 }
             }
@@ -215,7 +217,11 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
         temp_buf[len] = '\0';
         
         float new_limit = atof(temp_buf);
-        if (new_limit > 0) {
+        if (new_limit >= MIN_THRESHOLD && new_limit <= MAX_THRESHOLD) {
+
+            pthread_mutex_lock(&lock_threshold);
+            current_threshold = new_limit;
+            pthread_mutex_unlock(&lock_threshold);
             // Gửi vào chung Queue với Button
             mq_send(mq_limit, (const char*)&new_limit, sizeof(new_limit), 0);
             printf("MQTT: Đã đẩy ngưỡng %.1f vào Queue\n", new_limit);
@@ -280,7 +286,12 @@ int main() {
     mq_pzem_oled = mq_open(QUEUE_PZEM_OLED, O_CREAT | O_RDWR, 0644, &attr_s);
     mq_pzem_mqtt = mq_open(QUEUE_PZEM_MQTT, O_CREAT | O_RDWR, 0644, &attr_s);
 
-    // Tạo 4 luồng
+    if (pthread_mutex_init(&lock_threshold, NULL) != 0) {
+            printf("Lỗi: Không thể khởi tạo Mutex!\n");
+            return -1;
+    }
+
+    // Tạo 5 luồng
     pthread_create(&t1, NULL, thread_read_pzem, NULL);
     pthread_create(&t2, NULL, thread_display_oled, NULL);
     pthread_create(&t3, NULL, thread_led_blink, NULL);
@@ -294,10 +305,16 @@ int main() {
     pthread_join(t4, NULL);
     pthread_join(t5, NULL);
 
+// 7. Dọn dẹp tài nguyên trước khi thoát (Cleanup)
     mq_close(mq_limit);
     mq_close(mq_pzem_oled);
     mq_close(mq_pzem_mqtt);
+    mq_unlink(QUEUE_LIMIT);
+    mq_unlink(QUEUE_PZEM_OLED);
+    mq_unlink(QUEUE_PZEM_MQTT);
 
     close(fd_oled);
+    // Hủy Mutex
+    pthread_mutex_destroy(&lock_threshold);
     return 0;
 }
