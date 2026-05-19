@@ -10,7 +10,7 @@
 #include <time.h>
 #include "OLED_LCD_SSD1306.h"
 #include "fonts.h"
-
+#include <signal.h>
 // --- Cấu hình thiết bị ---
 #define LED_DEVICE "/dev/led_test"
 #define BUTTON_DEVICE "/dev/input/my_button"
@@ -41,6 +41,38 @@ struct mosquitto *global_mosq = NULL;
 
 mqd_t mq_limit, mq_pzem_oled, mq_pzem_mqtt;
 pthread_mutex_t lock_threshold;
+
+void handle_sigint(int sig) {
+    printf("\nĐang đóng chương trình và dọn dẹp tài nguyên...\n");
+
+    // 1. Ngắt kết nối MQTT an toàn để broker không bị treo session
+    if (global_mosq) {
+        mosquitto_disconnect(global_mosq);
+        mosquitto_destroy(global_mosq);
+    }
+
+    // 2. Tắt màn hình OLED hoặc hiển thị chữ "ERROR" trước khi sập
+    SSD1306_Fill(&myOLED, SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(&myOLED, 10, 0);
+    SSD1306_Puts(&myOLED, "!! SHUTTING DOWN !!", &Font_7x10, SSD1306_COLOR_WHITE);
+    SSD1306_UpdateScreen(&myOLED);
+    close(fd_oled);
+
+    // Đóng Message Queue
+    mq_close(mq_limit);
+    mq_close(mq_pzem_oled);
+    mq_close(mq_pzem_mqtt);
+    // Xóa Message Queue khỏi hệ thống
+    mq_unlink(QUEUE_LIMIT);
+    mq_unlink(QUEUE_PZEM_OLED);
+    mq_unlink(QUEUE_PZEM_MQTT);
+    
+    pthread_mutex_destroy(&lock_threshold);
+
+    printf("Don dep hoan tat. Chu dong thoat de Script Init.d tu khoi dong lai!\n");
+    exit(0);
+}
+
 // --- Luồng 1: Đọc từ Driver PZEM (Producer) ---
 void* thread_read_pzem(void* arg) {
     char buf[MAX_PZEM_STR];
@@ -262,6 +294,12 @@ void* thread_mqtt(void* arg) {
 // --- Hàm Main ---
 int main() {
     pthread_t t1, t2, t3, t4, t5;
+
+    // 1. Đăng ký xử lý tín hiệu để dọn dẹp khi bị tắt
+    signal(SIGSEGV, handle_sigint); // Lỗi truy cập vùng nhớ trái phép
+    signal(SIGABRT, handle_sigint); // Lỗi khi hàm assert thất bại hoặc gọi abort()
+    signal(SIGINT, handle_sigint); // Tín hiệu khi bấm Ctrl+C để test
+    signal(SIGTERM, handle_sigint); // Tín hiệu khi bị pkill hoặc kill thông thường
 
     fd_oled = open("/dev/oled_ssd1306", O_WRONLY);
     if (fd_oled < 0) {

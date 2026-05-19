@@ -22,6 +22,12 @@ case "$1" in
     sleep 1
     chmod 666 /dev/input/event1
 
+    (
+      while true; do
+        /usr/bin/btl_app
+        sleep 3
+      done
+    ) &
 
     # Chạy ứng dụng BTL (Chuyển log vào file để debug nếu cần)
     #/usr/bin/btl_app > /var/log/btl_app.log 2>&1 &
